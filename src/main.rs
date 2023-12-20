@@ -2,9 +2,9 @@
 use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs, path::{Path, PathBuf}, ffi::OsStr, process::{exit, Command, Stdio}, time::Duration};
 
 use clap::{command, Parser};
-use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle}, FromFileError, PlaybackState}, tween::Tween};
+use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{PlaybackState, static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings}}, tween::Tween};
 use openmpt::info::get_supported_extensions;
-use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, MediaPosition};
+use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, MediaPosition, SeekDirection};
 use rand::thread_rng;
 use rand::seq::SliceRandom;
 
@@ -35,7 +35,7 @@ struct Status {
     manager: AudioManager,
     upcoming: VecDeque<PathBuf>,
     lookback: VecDeque<PathBuf>,
-    handle: Option<StreamingSoundHandle<FromFileError>>
+    handle: Option<StaticSoundHandle>
 }
 
 impl fmt::Debug for Status {
@@ -78,7 +78,7 @@ impl Status {
         };
         let sound = match ext {
             "wav" | "mp3" => {
-                StreamingSoundData::from_file(path, StreamingSoundSettings::default()).unwrap()
+                StaticSoundData::from_file(path, StaticSoundSettings::default()).unwrap()
             }
             x if MOD_FORMATS.get().unwrap().contains(&x.to_string()) => {
                 let mut cmd = Command::new("openmpt123");
@@ -87,13 +87,14 @@ impl Status {
                 #[cfg(debug_assertions)]
                 println!("{:?}",cmd);
                 let _ = cmd.spawn().unwrap().wait();
-                StreamingSoundData::from_file("/tmp/openmpt_convert.wav", StreamingSoundSettings::default()).unwrap()
+                StaticSoundData::from_file("/tmp/openmpt_convert.wav", StaticSoundSettings::default()).unwrap()
                 //let mut file = File::open(path).unwrap();
                 //let module = Module::create(&mut file, Logger::None, &[]).unwrap();
                 //StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
             }
             _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("failed to unwrap"))
         };
+        meta.duration = Some(sound.duration());
         let hand = self.manager.play(sound).unwrap();
         self.handle = Some(hand);
         let _ = self.controls.set_metadata(meta);
@@ -240,6 +241,23 @@ fn main() {
                 },
                 MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)},
                 MediaControlEvent::Previous => {state.do_the_previous_one()}
+                MediaControlEvent::SetPosition(pos) => {
+                    state.handle.as_mut().map(|h| h.seek_to(pos.0.as_secs_f64()));
+                }
+                MediaControlEvent::Seek(dir) => {
+                    state.handle.as_mut().map(|h| h.seek_by(match dir {
+                        SeekDirection::Forward => 10.0,
+                        SeekDirection::Backward => -10.0
+                    }));
+                }
+                MediaControlEvent::SeekBy(dir, dur) => {
+                    state.handle.as_mut().map(|h| h.seek_by(
+                        match dir {
+                            SeekDirection::Forward => 1.0,
+                            SeekDirection::Backward => -1.0
+                        } * dur.as_secs_f64()
+                    ));
+                }
                 x => println!("Event not yet implemented {:?}",x)
             }
             update_playback(&mut state);
@@ -270,23 +288,17 @@ fn main() {
   
     loop {
         let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
+        let stopped = !state.handle.as_ref().map_or(false, |x| x.state() == PlaybackState::Playing || x.state() == PlaybackState::Paused);
         if
-            state.upcoming.is_empty() &&
-            state.handle.as_ref().map_or(false, |x| x.state() != PlaybackState::Playing)
+            state.upcoming.is_empty() && stopped
+            
         {
             if args.looping {
                 state.handle = None;
             } else {
                 break
             }
-        } else {
-            #[cfg(debug_assertions)]
-            println!(r#"
-looping {},
-upcoming size {:?},
-playing? {:?} ,
-            "#,args.looping,state.upcoming,state.handle.as_ref().map(|h| h.state() != PlaybackState::Playing));
-        };
+        }
         if state.upcoming.is_empty() && state.handle.is_none()  {
             #[cfg(debug_assertions)]
             println!("upcoming queue is empty");
@@ -302,7 +314,7 @@ playing? {:?} ,
             #[cfg(debug_assertions)]
             println!("upcoming {:?}",state.upcoming)
         }
-        if state.handle.as_ref().map_or(true, |h| h.state() != PlaybackState::Playing) {
+        if stopped {
             println!("finished");
             state.play_next_song();
         } else {
