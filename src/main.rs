@@ -1,16 +1,15 @@
-mod moddecoder;
-use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs::{self, File}, path::{Path, PathBuf}, ffi::OsStr, process::exit};
+
+use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs, path::{Path, PathBuf}, ffi::OsStr, process::{exit, Command, Stdio}, time::Duration};
 
 use clap::{command, Parser};
-use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle}, FromFileError}};
-use openmpt::{info::get_supported_extensions, module::{Module, Logger}};
-use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent};
+use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle}, FromFileError, PlaybackState}, tween::Tween};
+use openmpt::info::get_supported_extensions;
+use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, MediaPosition};
 use rand::thread_rng;
 use rand::seq::SliceRandom;
 
-use crate::moddecoder::ModDecoder;
 
-fn quoted(tgt: &String) -> Vec<String> {
+fn quoted(tgt: &str) -> Vec<String> {
     let mut res = vec![];
     let mut capture = false;
     let mut buf = vec![];
@@ -31,10 +30,11 @@ fn quoted(tgt: &String) -> Vec<String> {
 }
 
 struct Status {
+    paused: bool,
     controls: MediaControls,
     manager: AudioManager,
-    upcoming: VecDeque<String>,
-    lookback: VecDeque<String>,
+    upcoming: VecDeque<PathBuf>,
+    lookback: VecDeque<PathBuf>,
     handle: Option<StreamingSoundHandle<FromFileError>>
 }
 
@@ -45,35 +45,76 @@ impl fmt::Debug for Status {
 }
 
 impl Status {
+    fn stopit(&mut self) {
+        if self.handle.is_some() {
+            self.handle.as_mut().unwrap().stop(Tween::default()).unwrap();
+        }
+    }
     fn play_next_song(&mut self) {
+        self.stopit();
         println!("playing next song");
-        let upcoming = self.upcoming.pop_front().unwrap();
+        #[cfg(debug_assertions)]
+        println!("before {:?}",self.upcoming);
+        let upcoming = if let Some(upcoming) = self.upcoming.pop_front() {
+            upcoming
+        } else {
+            let _ = self.handle.as_mut().unwrap().stop(Tween::default());
+            return;
+        };
+        #[cfg(debug_assertions)]
+        println!("after {:?}",self.upcoming);
         self.push_song_to_lookback(upcoming.clone());
         let path = Path::new(&upcoming);
+        #[cfg(debug_assertions)]
         println!("path {:?}",path);
         if !path.exists() {return}
         let ext = path.extension().unwrap_or(OsStr::new("")).to_str().unwrap_or("");
+        #[cfg(debug_assertions)]
         println!("extension {}",ext);
+        #[allow(unused_mut)]
+        let mut meta = MediaMetadata {
+            title: path.file_name().unwrap().to_str(),
+            ..Default::default()
+        };
         let sound = match ext {
-            "wav" => {
+            "wav" | "mp3" => {
                 StreamingSoundData::from_file(path, StreamingSoundSettings::default()).unwrap()
             }
             x if MOD_FORMATS.get().unwrap().contains(&x.to_string()) => {
-                let mut file = File::open(path).unwrap();
-                let module = Module::create(&mut file, Logger::None, &[]).unwrap();
-                StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
+                let mut cmd = Command::new("openmpt123");
+                cmd.args([path.to_str().unwrap(),"-o","/tmp/openmpt_convert.wav", "--force"]);
+                cmd.stdout(Stdio::null());
+                #[cfg(debug_assertions)]
+                println!("{:?}",cmd);
+                let _ = cmd.spawn().unwrap().wait();
+                StreamingSoundData::from_file("/tmp/openmpt_convert.wav", StreamingSoundSettings::default()).unwrap()
+                //let mut file = File::open(path).unwrap();
+                //let module = Module::create(&mut file, Logger::None, &[]).unwrap();
+                //StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
             }
             _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("failed to unwrap"))
         };
-        self.handle = Some(self.manager.play(sound).unwrap());
+        let hand = self.manager.play(sound).unwrap();
+        self.handle = Some(hand);
+        let _ = self.controls.set_metadata(meta);
+        let _ = self.controls.set_playback(souvlaki::MediaPlayback::Playing { progress: None });
         println!("song is playing");
         
     }
-    fn push_song_to_lookback(&mut self, song: String) {
+    fn push_song_to_lookback(&mut self, song: PathBuf) {
         if self.lookback.len() == self.lookback.capacity() {
             let _ = self.lookback.pop_back(); //we know it is at capacity. and we are voiding it anyways.
         }
         self.lookback.push_front(song)
+    }
+    fn do_the_previous_one(&mut self) {
+        if let Some(song) = self.lookback.pop_front() {
+            self.upcoming.push_front(song);
+        }
+        if let Some(song) = self.lookback.pop_front() {
+            self.upcoming.push_front(song);
+        }
+        self.play_next_song();
     }
 }
 
@@ -93,10 +134,10 @@ struct Args {
 static GLOBAL_STATE: OnceLock<Mutex<Status>> = OnceLock::new();
 static MOD_FORMATS: OnceLock<Vec<String>> = OnceLock::new();
 
-fn get_songs(file_or_path: &Path) -> Vec<String> {
+fn get_songs(file_or_path: &Path) -> Vec<PathBuf> {
     if file_or_path.is_dir() {
         let mut q = Vec::new();
-        if let Ok(entries) = fs::read_dir(&file_or_path) {
+        if let Ok(entries) = fs::read_dir(file_or_path) {
             for entry in entries.flatten() {
                 if entry.path().exists() {
                     q.extend(get_songs(&entry.path()));
@@ -105,8 +146,10 @@ fn get_songs(file_or_path: &Path) -> Vec<String> {
         }
 
         q.sort_by(|a, b| b.cmp(a));
-        return q;
+        q
     } else {
+        #[cfg(debug_assertions)]
+        println!("{:?}",file_or_path);
         let ext = file_or_path.extension().unwrap_or(OsStr::new("")).to_str().unwrap();
         match ext {
             "m3u" => {
@@ -118,23 +161,41 @@ fn get_songs(file_or_path: &Path) -> Vec<String> {
                 for l in lines {
                     let p = Path::new(l);
                     if p.extension().unwrap().to_str().unwrap() == "m3u" {
-                        let s = get_songs(&p);
+                        let s = get_songs(p);
                         final_songs.extend(s);
                     } else {
-                        final_songs.push(String::from(l));
+                        final_songs.push(p.into());
                     }
                 }
-                return final_songs;
+                final_songs
             }
-            _ => return vec![file_or_path.to_str().unwrap().to_string()],
+            _ => vec![file_or_path.into()],
         }
+    }
+}
+
+fn update_playback(state: &mut Status) {
+    let pos = state.handle.as_ref().map_or(0 as f64, |h| h.position());
+    let duration = Some(MediaPosition(
+        Duration::from_secs_f64(
+            pos
+        )
+    ));
+    if state.paused {
+        let _ = state.controls.set_playback(souvlaki::MediaPlayback::Paused { progress: duration });
+    } else {
+        let _ = state.controls.set_playback(
+            souvlaki::MediaPlayback::Playing { 
+                progress: duration
+            }
+        );
     }
 }
 
 fn main() {
     let args = Args::parse();
-    let _ = MOD_FORMATS.set(get_supported_extensions().split(";").map(|x| x.to_string()).collect());
-    
+    let _ = MOD_FORMATS.set(get_supported_extensions().split(';').map(|x| x.to_string()).collect());
+    #[cfg(debug_assertions)]
     println!("{:?}",args.files);
     #[cfg(not(target_os = "windows"))]
     let hwnd = None;
@@ -158,15 +219,30 @@ fn main() {
             let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
             match event {
                 MediaControlEvent::Next => state.play_next_song(),
-                // MediaControlEvent::Pause => {state.handle.as_mut().map(|h| h.guard().paused = true);},
-                // MediaControlEvent::Play => {state.handle.as_mut().map(|h| h.guard().paused = false);},
-                // MediaControlEvent::Toggle => {
-                //     let mut rg = state.handle.as_mut().unwrap().guard();
-                //     rg.paused = !rg.paused;
-                // },
+                MediaControlEvent::Pause => {
+                    state.paused = true;
+                    let _ = state.handle.as_mut().map(|h| h.pause(Tween::default()));
+                },
+                MediaControlEvent::Play => {
+                    state.paused = false;
+                    let _ = state.handle.as_mut().map(|h| h.resume(Tween::default()));
+                },
+                MediaControlEvent::Toggle => {
+                    let rg = state.paused;
+                    state.handle.as_mut().map(|handle| {
+                        let _ = if rg {
+                            handle.resume(Tween::default())
+                        } else {
+                            handle.pause(Tween::default())
+                        };
+                    });
+                    state.paused = !rg;
+                },
                 MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)},
+                MediaControlEvent::Previous => {state.do_the_previous_one()}
                 x => println!("Event not yet implemented {:?}",x)
             }
+            update_playback(&mut state);
         })
         .unwrap();
 
@@ -183,48 +259,56 @@ fn main() {
     let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).unwrap();
 
 
-    GLOBAL_STATE.set(Mutex::new(Status { 
+    GLOBAL_STATE.set(Mutex::new(Status {
+        paused: false,
         controls, 
         manager,
         upcoming: VecDeque::new(), 
         lookback: VecDeque::with_capacity(32),
         handle: None
     })).unwrap();
-
-    let mut once_bool = true; //so the loop runs once before letting looping take over
-    
+  
     loop {
         let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
-        if !(args.looping || once_bool) && !state.upcoming.is_empty() && state.manager.num_sounds()==0 {
-            println!("exiting lp:{}\nonce: {}, upcoming: {}",args.looping,once_bool,state.upcoming.is_empty());
-            break
+        if
+            state.upcoming.is_empty() &&
+            state.handle.as_ref().map_or(false, |x| x.state() != PlaybackState::Playing)
+        {
+            if args.looping {
+                state.handle = None;
+            } else {
+                break
+            }
+        } else {
+            #[cfg(debug_assertions)]
+            println!(r#"
+looping {},
+upcoming size {:?},
+playing? {:?} ,
+            "#,args.looping,state.upcoming,state.handle.as_ref().map(|h| h.state() != PlaybackState::Playing));
         };
-        once_bool=false;
-        if state.upcoming.is_empty() {
+        if state.upcoming.is_empty() && state.handle.is_none()  {
+            #[cfg(debug_assertions)]
             println!("upcoming queue is empty");
             let mut queue = vec![];
             for path in &args.files {
-                queue.append(&mut get_songs(&path));
+                queue.append(&mut get_songs(path));
             }
             queue.dedup();
             if args.shuffle {
                 queue.shuffle(&mut thread_rng());
             }
             state.upcoming.append(&mut queue.into());
+            #[cfg(debug_assertions)]
             println!("upcoming {:?}",state.upcoming)
         }
-        if state.manager.num_sounds() == 0 {
+        if state.handle.as_ref().map_or(true, |h| h.state() != PlaybackState::Playing) {
             println!("finished");
             state.play_next_song();
         } else {
-            println!(
-                "it is still playing"
-            )    
+            update_playback(&mut state);
         }
         drop(state);
-        // sl.voice_count() > 0 {
-        //     std::thread::sleep(std::time::Duration::from_millis(100));
-        // }    
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

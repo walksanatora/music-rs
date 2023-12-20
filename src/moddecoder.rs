@@ -1,3 +1,5 @@
+use std::ffi::c_float;
+
 use kira::{
     dsp::Frame,
     sound::{streaming::Decoder, FromFileError},
@@ -13,14 +15,18 @@ unsafe impl Send for ModDecoder {}
 
 impl ModDecoder {
     pub fn new(mut module: Module) -> ModDecoder {
+        println!("decoding duration: {}",module.get_duration_seconds());
         let mut frames = vec![];
         let mut bytes_poped = 1;
-        let mut left = Vec::with_capacity(44100);
-        let mut right = Vec::with_capacity(44100);
+        let mut left: Vec<c_float> = Vec::with_capacity(22050);
+        let mut right: Vec<c_float> = Vec::with_capacity(22050);
         while bytes_poped != 0 {
             bytes_poped = module.read_float_stereo(22050, &mut left, &mut right);
+            println!("wrote {} bytes",bytes_poped);
+            println!("{left:?} {right:?}");
             right.reverse();
             for val in left.iter() {
+                println!("frame push");
                 frames.push(
                     Frame {
                         left: val.clone(),
@@ -42,6 +48,7 @@ impl Decoder for ModDecoder {
     }
 
     fn num_frames(&self) -> usize {
+        println!("num_frames called, no# of frames {}",self.frames.len());
         self.frames.len()
     }
 
