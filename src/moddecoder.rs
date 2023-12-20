@@ -1,3 +1,5 @@
+// UNUSED cause openmpt is dumb. see below comment for why
+
 use std::ffi::c_float;
 
 use kira::{
@@ -21,6 +23,8 @@ impl ModDecoder {
         let mut left: Vec<c_float> = Vec::with_capacity(22050);
         let mut right: Vec<c_float> = Vec::with_capacity(22050);
         while bytes_poped != 0 {
+            // okay so the bytes_poped gets set correctly. but at the same time no values are pushed into the left/right audio buffers
+            // either this is a OpenMPT problem or smth about Rust C interop. IDK
             bytes_poped = module.read_float_stereo(22050, &mut left, &mut right);
             println!("wrote {} bytes",bytes_poped);
             println!("{left:?} {right:?}");
