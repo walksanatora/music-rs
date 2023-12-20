@@ -1,13 +1,14 @@
-mod custom_mixer;
-use custom_mixer::*;
-use kittyaudio::{Sound, Frame, Mixer, SoundHandle};
-use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs::{self, File}, path::{Path, PathBuf}, ffi::OsStr, process::exit, iter::once};
+mod moddecoder;
+use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs::{self, File}, path::{Path, PathBuf}, ffi::OsStr, process::exit};
 
 use clap::{command, Parser};
+use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle}, FromFileError}};
 use openmpt::{info::get_supported_extensions, module::{Module, Logger}};
 use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent};
 use rand::thread_rng;
 use rand::seq::SliceRandom;
+
+use crate::moddecoder::ModDecoder;
 
 fn quoted(tgt: &String) -> Vec<String> {
     let mut res = vec![];
@@ -31,10 +32,10 @@ fn quoted(tgt: &String) -> Vec<String> {
 
 struct Status {
     controls: MediaControls,
-    mixer: Mixer,
+    manager: AudioManager,
     upcoming: VecDeque<String>,
     lookback: VecDeque<String>,
-    handle: Option<SoundHandle>
+    handle: Option<StreamingSoundHandle<FromFileError>>
 }
 
 impl fmt::Debug for Status {
@@ -55,34 +56,16 @@ impl Status {
         println!("extension {}",ext);
         let sound = match ext {
             "wav" => {
-                Sound::from_path(path).unwrap()
+                StreamingSoundData::from_file(path, StreamingSoundSettings::default()).unwrap()
             }
             x if MOD_FORMATS.get().unwrap().contains(&x.to_string()) => {
                 let mut file = File::open(path).unwrap();
-                let mut module = Module::create(&mut file, Logger::None, &[]).unwrap();
-                let mut frames = vec![];
-                let mut bytes_poped = 1;
-                let mut left = Vec::with_capacity(44100);
-                let mut right = Vec::with_capacity(44100);
-                while bytes_poped != 0 {
-                    bytes_poped = module.read_float_stereo(22050, &mut left, &mut right);
-                    right.reverse();
-                    for val in left.iter() {
-                        frames.push(
-                            Frame {
-                                left: val.clone(),
-                                right: right.pop().unwrap() // they should hopefully be the same size.
-                            }
-                        )
-                    }
-                    left.clear()
-                }
-                Sound::from_frames(22050, &frames.into_boxed_slice())
+                let module = Module::create(&mut file, Logger::None, &[]).unwrap();
+                StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
             }
             _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("failed to unwrap"))
         };
-        println!("duration {}",sound.duration_seconds());
-        self.handle = Some(self.mixer.play(sound));
+        self.handle = Some(self.manager.play(sound).unwrap());
         println!("song is playing");
         
     }
@@ -175,12 +158,12 @@ fn main() {
             let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
             match event {
                 MediaControlEvent::Next => state.play_next_song(),
-                MediaControlEvent::Pause => {state.handle.as_mut().map(|h| h.guard().paused = true);},
-                MediaControlEvent::Play => {state.handle.as_mut().map(|h| h.guard().paused = false);},
-                MediaControlEvent::Toggle => {
-                    let mut rg = state.handle.as_mut().unwrap().guard();
-                    rg.paused = !rg.paused;
-                },
+                // MediaControlEvent::Pause => {state.handle.as_mut().map(|h| h.guard().paused = true);},
+                // MediaControlEvent::Play => {state.handle.as_mut().map(|h| h.guard().paused = false);},
+                // MediaControlEvent::Toggle => {
+                //     let mut rg = state.handle.as_mut().unwrap().guard();
+                //     rg.paused = !rg.paused;
+                // },
                 MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)},
                 x => println!("Event not yet implemented {:?}",x)
             }
@@ -197,12 +180,12 @@ fn main() {
         })
         .unwrap();
     
-    let mixer = Mixer::new();
+    let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).unwrap();
 
 
     GLOBAL_STATE.set(Mutex::new(Status { 
         controls, 
-        mixer,
+        manager,
         upcoming: VecDeque::new(), 
         lookback: VecDeque::with_capacity(32),
         handle: None
@@ -212,7 +195,7 @@ fn main() {
     
     loop {
         let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
-        if (!(args.looping || once_bool) && !state.upcoming.is_empty() && state.mixer.is_finished()) {
+        if !(args.looping || once_bool) && !state.upcoming.is_empty() && state.manager.num_sounds()==0 {
             println!("exiting lp:{}\nonce: {}, upcoming: {}",args.looping,once_bool,state.upcoming.is_empty());
             break
         };
@@ -230,11 +213,13 @@ fn main() {
             state.upcoming.append(&mut queue.into());
             println!("upcoming {:?}",state.upcoming)
         }
-        if state.mixer.is_finished() {
+        if state.manager.num_sounds() == 0 {
             println!("finished");
             state.play_next_song();
         } else {
-            println!("song is still playing");
+            println!(
+                "it is still playing"
+            )    
         }
         drop(state);
         // sl.voice_count() > 0 {
