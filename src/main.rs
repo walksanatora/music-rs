@@ -214,6 +214,8 @@ fn main() {
         hwnd,
     };
 
+    #[cfg(debug_assertions)]
+    println!("creating media controls");
     let mut controls = MediaControls::new(config).unwrap();
     controls
         .attach(|event| {
@@ -230,13 +232,11 @@ fn main() {
                 },
                 MediaControlEvent::Toggle => {
                     let rg = state.paused;
-                    state.handle.as_mut().map(|handle| {
-                        let _ = if rg {
+                    if let Some(handle) = state.handle.as_mut() { let _ = if rg {
                             handle.resume(Tween::default())
                         } else {
                             handle.pause(Tween::default())
-                        };
-                    });
+                        }; }
                     state.paused = !rg;
                 },
                 MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)},
@@ -263,6 +263,9 @@ fn main() {
             update_playback(&mut state);
         })
         .unwrap();
+    
+    #[cfg(debug_assertions)]
+    println!("setting initial metadata");
 
     // Update the media metadata.
     controls
@@ -274,9 +277,12 @@ fn main() {
         })
         .unwrap();
     
+    #[cfg(debug_assertions)]
+    println!("audio manager");
     let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).unwrap();
 
-
+    #[cfg(debug_assertions)]
+    println!("creating GLOBAL_STATE");
     GLOBAL_STATE.set(Mutex::new(Status {
         paused: false,
         controls, 
@@ -288,7 +294,7 @@ fn main() {
   
     loop {
         let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
-        let stopped = !state.handle.as_ref().map_or(false, |x| x.state() == PlaybackState::Playing || x.state() == PlaybackState::Paused);
+        let stopped = !state.handle.as_ref().map_or(true, |x| x.state() == PlaybackState::Playing || x.state() == PlaybackState::Paused);
         if
             state.upcoming.is_empty() && stopped
             
@@ -296,26 +302,29 @@ fn main() {
             if args.looping {
                 state.handle = None;
             } else {
+                #[cfg(debug_assertions)]
+                println!("breaking, state {:?}",state.handle.as_ref().map_or(PlaybackState::Stopping,|h| h.state()));
                 break
             }
         }
         if state.upcoming.is_empty() && state.handle.is_none()  {
-            #[cfg(debug_assertions)]
-            println!("upcoming queue is empty");
+            println!("filling queue.");
             let mut queue = vec![];
             for path in &args.files {
                 queue.append(&mut get_songs(path));
             }
             queue.dedup();
             if args.shuffle {
+                print!("Shuffling...");
                 queue.shuffle(&mut thread_rng());
+                println!(" Done!");
             }
             state.upcoming.append(&mut queue.into());
             #[cfg(debug_assertions)]
             println!("upcoming {:?}",state.upcoming)
         }
-        if stopped {
-            println!("finished");
+        if stopped || state.handle.is_none() {
+            println!("playing");
             state.play_next_song();
         } else {
             update_playback(&mut state);
