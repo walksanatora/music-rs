@@ -13,7 +13,7 @@ pub struct ModDecoder {
     pos: usize,
 }
 
-unsafe impl Send for ModDecoder {}
+unsafe impl Send for ModDecoder {} // tell the compiler that we are safe to `Send` across threads
 
 impl ModDecoder {
     pub fn new(mut module: Module) -> ModDecoder {

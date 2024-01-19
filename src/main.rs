@@ -1,19 +1,32 @@
+// a bunch of impports from the standard library. in order...
+// we import mutex/once lock for some globals (statics)
+// vecDequeue since it is efficent to push/pop from front unlike vec which makes it slow.
+// fmt so we can implement Debug on some of our types
+// fs so we can read audio files to bytes
+// path(buf) for the ability to actually read files
+// OsStr is needed for some souvlaki stuff (that or it was pathbuf. it has been soo long)
+// process stuff so we can exit early, and command so that we can run `openmpt123` as subprocess
+// duration so it can manage delays/times with souvlaki
+use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs, path::{Path, PathBuf}, ffi::OsStr, process::{exit, Command, Stdio}, time::Duration, str::FromStr};
 
-use std::{sync::{Mutex, OnceLock}, collections::VecDeque, fmt, fs, path::{Path, PathBuf}, ffi::OsStr, process::{exit, Command, Stdio}, time::Duration};
-
+// we then import clap so making CLI args are easy
 use clap::{command, Parser};
+// kira is a audio manager crate that allows us to play audio...
 use kira::{manager::{AudioManager, backend::DefaultBackend, AudioManagerSettings}, sound::{PlaybackState, static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings}}, tween::Tween};
+// I would use more functions from openmpt but the api is broken.
 use openmpt::info::get_supported_extensions;
+// souvlaki provides cross-platform media controls
 use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, MediaPosition, SeekDirection};
+// and we use rand to shuffle the list.
 use rand::thread_rng;
 use rand::seq::SliceRandom;
 
-
-fn quoted(tgt: &str) -> Vec<String> {
+///unused, was used in previous version. but have not re-implemented the custom playlist format from the origionall python version
+fn quoted<T>(tgt: T) -> Vec<String> where T: Iterator<Item = char> {
     let mut res = vec![];
     let mut capture = false;
     let mut buf = vec![];
-    for ch in tgt.chars() {
+    for ch in tgt {
         if ch == '"' {
             if capture {
                 let str: String = buf.iter().collect();
@@ -29,12 +42,19 @@ fn quoted(tgt: &str) -> Vec<String> {
     res
 }
 
+/// global struct for the state of the media player
 struct Status {
+    /// whether or not the media player is paused
     paused: bool,
+    /// the instancce of the souvlaki media controlls
     controls: MediaControls,
+    /// the instance of the kira audio manager
     manager: AudioManager,
+    /// the upcoming list of paths to play as music
     upcoming: VecDeque<PathBuf>,
+    /// a size-limited queue that acts as a "lookback" buffer so you can play previous songs
     lookback: VecDeque<PathBuf>,
+    /// this is a kira soundhandle. if audio is playing this should be `Some`
     handle: Option<StaticSoundHandle>
 }
 
@@ -45,11 +65,13 @@ impl fmt::Debug for Status {
 }
 
 impl Status {
+    /// stops playing audio if it is playing.
     fn stopit(&mut self) {
         if self.handle.is_some() {
             self.handle.as_mut().unwrap().stop(Tween::default()).unwrap();
         }
     }
+    /// stops the current song and plays the next one 
     fn play_next_song(&mut self) {
         self.stopit();
         println!("playing next song");
@@ -102,19 +124,24 @@ impl Status {
         println!("song is playing");
         
     }
+    /// pushes a specified PathBuf to the front of lookback. this voids a old value if the len is == capacity
     fn push_song_to_lookback(&mut self, song: PathBuf) {
         if self.lookback.len() == self.lookback.capacity() {
             let _ = self.lookback.pop_back(); //we know it is at capacity. and we are voiding it anyways.
         }
         self.lookback.push_front(song)
     }
+    /// plays the song at the front of the lookback...
     fn do_the_previous_one(&mut self) {
+        // we pop one from the lookback (the current song)
         if let Some(song) = self.lookback.pop_front() {
             self.upcoming.push_front(song);
         }
+        // we pop a second one from the lookback (the previous song)
         if let Some(song) = self.lookback.pop_front() {
             self.upcoming.push_front(song);
         }
+        // we then play the next song
         self.play_next_song();
     }
 }
@@ -122,69 +149,77 @@ impl Status {
 #[derive(Parser, Debug)]
 #[command(author = "walksanator", version = "v1", about = "command line music player", long_about = None)]
 struct Args {
+    /// whether or not to shuffle the audio before playing
     #[arg(short, long, help = "sets whether or not to shuffle the music list")]
     shuffle: bool,
 
+    /// whether or not to loop the playlist when it is empty
     #[arg(short, long, help = "sets looping of the music when all songs have been played")]
     looping: bool,
     
+    /// all the songs to play
     #[arg(required(true))]
     files: Vec<PathBuf>,
 }
 
+/// a once lock to hold a mutex of our status so we can refrence it later
 static GLOBAL_STATE: OnceLock<Mutex<Status>> = OnceLock::new();
+/// I *would* do this at compile time. but it can change from platform to platform.
 static MOD_FORMATS: OnceLock<Vec<String>> = OnceLock::new();
 
+/// this function gets all songs withing a folder. or the file it's self (recursive)
 fn get_songs(file_or_path: &Path) -> Vec<PathBuf> {
     if file_or_path.is_dir() {
+        // if it is a folder we need to get all songs within said folder... recursively
+        // create a array to hold all songs within this folder.
         let mut q = Vec::new();
+        // now we iterate over all files. if it was able to read the folder.
         if let Ok(entries) = fs::read_dir(file_or_path) {
+            // flatten the directory into a entry
             for entry in entries.flatten() {
                 if entry.path().exists() {
                     q.extend(get_songs(&entry.path()));
                 }
             }
         }
-
+        // sort alphabetically
         q.sort_by(|a, b| b.cmp(a));
         q
     } else {
+        // the path specified is a single file
         #[cfg(debug_assertions)]
         println!("{:?}",file_or_path);
+        // we get the extension.
         let ext = file_or_path.extension().unwrap_or(OsStr::new("")).to_str().unwrap();
         match ext {
-            "m3u" => {
+            "m3u" => { //playlist format so we add each line to the list
                 let contents = fs::read_to_string(file_or_path).unwrap_or_default();
                 let mut lines: Vec<&str> = contents.lines().collect();
-                lines.reverse();
+                lines.reverse(); // the iterator reverses it. so to keep it in order. we reverse the lines here.
 
                 let mut final_songs = Vec::new();
                 for l in lines {
-                    let p = Path::new(l);
-                    if p.extension().unwrap().to_str().unwrap() == "m3u" {
-                        let s = get_songs(p);
-                        final_songs.extend(s);
-                    } else {
-                        final_songs.push(p.into());
-                    }
+                    final_songs.extend(get_songs(&PathBuf::from_str(l).unwrap()));
                 }
                 final_songs
             }
-            _ => vec![file_or_path.into()],
+            _ => vec![file_or_path.into()], // it is not a playlist so we just pass the file directly
         }
     }
 }
 
+/// updates playback state information via sovlaki
 fn update_playback(state: &mut Status) {
+    // get the handle's position in seconds
     let pos = state.handle.as_ref().map_or(0 as f64, |h| h.position());
     let duration = Some(MediaPosition(
         Duration::from_secs_f64(
             pos
         )
-    ));
-    if state.paused {
+    ));// turn it into a position
+    if state.paused { // if it is paused we set it as paused
         let _ = state.controls.set_playback(souvlaki::MediaPlayback::Paused { progress: duration });
-    } else {
+    } else { // else we set it as playing.
         let _ = state.controls.set_playback(
             souvlaki::MediaPlayback::Playing { 
                 progress: duration
@@ -194,12 +229,13 @@ fn update_playback(state: &mut Status) {
 }
 
 fn main() {
-    let args = Args::parse();
-    let _ = MOD_FORMATS.set(get_supported_extensions().split(';').map(|x| x.to_string()).collect());
+    let args = Args::parse(); // parse args
+    let _ = MOD_FORMATS.set(get_supported_extensions().split(';').map(|x| x.to_string()).collect()); // init the MOD_FORMATS
     #[cfg(debug_assertions)]
     println!("{:?}",args.files);
+    // souvlaki stuff... I just copied from the docs
     #[cfg(not(target_os = "windows"))]
-    let hwnd = None;
+    let hwnd = None; 
     #[cfg(target_os = "windows")]
     let hwnd = {
         use raw_window_handle::windows::WindowsHandle;
@@ -208,6 +244,7 @@ fn main() {
         Some(handle.hwnd)
     };
 
+    // dbus config so it shows up.
     let config = PlatformConfig {
         dbus_name: "walksanator_music_player",
         display_name: "Walksanator's MusicBox",
@@ -216,7 +253,9 @@ fn main() {
 
     #[cfg(debug_assertions)]
     println!("creating media controls");
+    // init media controlls
     let mut controls = MediaControls::new(config).unwrap();
+    // setup the event handler for all the media commands.
     controls
         .attach(|event| {
             let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
@@ -267,7 +306,7 @@ fn main() {
     #[cfg(debug_assertions)]
     println!("setting initial metadata");
 
-    // Update the media metadata.
+    // Update the media metadata to a default.
     controls
         .set_metadata(MediaMetadata {
             title: Some("Walksanator Music Player"),
@@ -278,11 +317,11 @@ fn main() {
         .unwrap();
     
     #[cfg(debug_assertions)]
-    println!("audio manager");
+    println!("audio manager"); // create the audio manager.
     let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).unwrap();
 
     #[cfg(debug_assertions)]
-    println!("creating GLOBAL_STATE");
+    println!("creating GLOBAL_STATE"); // setup the global state with all the instances created above.
     GLOBAL_STATE.set(Mutex::new(Status {
         paused: false,
         controls, 
@@ -293,12 +332,14 @@ fn main() {
     })).unwrap();
   
     loop {
-        let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
+        let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap(); // wait to lock the global state (thread safe waiting for ownership)
         let stopped = !state.handle.as_ref().map_or(true, |x| x.state() == PlaybackState::Playing || x.state() == PlaybackState::Paused);
+        // stopped is something dumb and I forgot why it works anymore. but it does so we dont question it
         if
             state.upcoming.is_empty() && stopped
             
         {
+            // the queue is empty and no audio is playing. let us refill it or exit the program
             if args.looping {
                 state.handle = None;
             } else {
@@ -307,13 +348,15 @@ fn main() {
                 break
             }
         }
+        // is the queue is empty and there is no currently playing audio
+        // refill queue
         if state.upcoming.is_empty() && state.handle.is_none()  {
             println!("filling queue.");
             let mut queue = vec![];
             for path in &args.files {
                 queue.append(&mut get_songs(path));
             }
-            queue.dedup();
+            queue.dedup(); // remove duplicate songs... (note: may remove this later)
             if args.shuffle {
                 print!("Shuffling...");
                 queue.shuffle(&mut thread_rng());
@@ -329,7 +372,7 @@ fn main() {
         } else {
             update_playback(&mut state);
         }
-        drop(state);
+        drop(state); // release the lock before we sleep so other threads have 100ms to access it before we lock it again
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
