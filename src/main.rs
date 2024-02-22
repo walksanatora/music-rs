@@ -21,7 +21,7 @@ use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, 
 use rand::thread_rng;
 use rand::seq::SliceRandom;
 
-///unused, was used in previous version. but have not re-implemented the custom playlist format from the origionall python version
+///unused, was used in previous version. but have not re-implemented the custom playlist format from the origionalM python version
 fn quoted<T>(tgt: T) -> Vec<String> where T: Iterator<Item = char> {
     let mut res = vec![];
     let mut capture = false;
