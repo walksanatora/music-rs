@@ -278,38 +278,39 @@ fn main() {
     // setup the event handler for all the media commands.
     controls
         .attach(|event| {
-            let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap();
+            //media button handler
+            let mut state = GLOBAL_STATE.get().unwrap().lock().unwrap(); //lock the state so we can change it
             match event {
-                MediaControlEvent::Next => state.play_next_song(),
+                MediaControlEvent::Next => state.play_next_song(),//skipping song
                 MediaControlEvent::Pause => {
-                    state.paused = true;
+                    state.paused = true; //pause it
                     let _ = state.handle.as_mut().map(|h| h.pause(Tween::default()));
                 },
                 MediaControlEvent::Play => {
-                    state.paused = false;
+                    state.paused = false; //unpause it
                     let _ = state.handle.as_mut().map(|h| h.resume(Tween::default()));
                 },
                 MediaControlEvent::Toggle => {
-                    let rg = state.paused;
+                    let rg = state.paused;//are we paused?
                     if let Some(handle) = state.handle.as_mut() { let _ = if rg {
-                            handle.resume(Tween::default())
+                            handle.resume(Tween::default())//unpause 
                         } else {
-                            handle.pause(Tween::default())
+                            handle.pause(Tween::default())//pause
                         }; }
                     state.paused = !rg;
                 },
-                MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)},
-                MediaControlEvent::Previous => {state.do_the_previous_one()}
-                MediaControlEvent::SetPosition(pos) => {
+                MediaControlEvent::Quit | MediaControlEvent::Stop => {exit(0)}, //quit the program
+                MediaControlEvent::Previous => {state.do_the_previous_one()} //go back 1 song
+                MediaControlEvent::SetPosition(pos) => { //seek to specific point in song
                     state.handle.as_mut().map(|h| h.seek_to(pos.0.as_secs_f64()));
                 }
-                MediaControlEvent::Seek(dir) => {
+                MediaControlEvent::Seek(dir) => { //seed by a specified direction 10 seconds
                     state.handle.as_mut().map(|h| h.seek_by(match dir {
                         SeekDirection::Forward => 10.0,
                         SeekDirection::Backward => -10.0
                     }));
                 }
-                MediaControlEvent::SeekBy(dir, dur) => {
+                MediaControlEvent::SeekBy(dir, dur) => { //seeks by a specified number of seconds foward/bacl
                     state.handle.as_mut().map(|h| h.seek_by(
                         match dir {
                             SeekDirection::Forward => 1.0,
@@ -317,7 +318,7 @@ fn main() {
                         } * dur.as_secs_f64()
                     ));
                 }
-                x => println!("Event not yet implemented {:?}",x)
+                x => println!("Event not yet implemented {:?}",x) //catch all for other un-implemented buttons (I have not found any)
             }
             update_playback(&mut state);
         })
