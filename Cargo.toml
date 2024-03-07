@@ -10,6 +10,7 @@ clap = { version = "4.4.11", features = ["derive"] }
 kira = "0.8.5"
 openmpt = "0.3.1"
 rand = "0.8.5"
+raw-window-handle = "0.6.0"
 souvlaki = "0.6.1"
 
 [not-deps]

@@ -21,31 +21,31 @@ use souvlaki::{PlatformConfig, MediaControls, MediaMetadata, MediaControlEvent, 
 use rand::thread_rng;
 use rand::seq::SliceRandom;
 
-///unused, was used in previous version. but have not re-implemented the custom playlist format from the origionalM python version
+/// takes a iterator of chars and produces a list of strings that have been surrounded by quotes
 fn quoted<T>(tgt: T) -> Vec<String> where T: Iterator<Item = char> {
-    let mut res = vec![];
-    let mut capture = false;
-    let mut buf = vec![];
-    let mut escaped = false;
-    for ch in tgt {
-        if escaped {
-            buf.push(ch);
-            escaped = false
-        } else if ch == '"' {
-            if capture {
-                let str: String = buf.iter().collect();
-                res.push(str);
+    let mut res = vec![]; // the result list
+    let mut capture = false; //if we are within a "
+    let mut buf = vec![]; //the current buffer of chars that will be en-stringed
+    let mut escaped = false; // if the next char is escaped (allows file names to contain with a `"` by escaping it)
+    for ch in tgt { //over each char
+        if escaped { //check if we escaped it
+            buf.push(ch); //push char directly
+            escaped = false //stop the escape
+        } else if ch == '"' { // if char is a quote
+            if capture { // check if capture is set
+                let str: String = buf.iter().collect(); // collect the buffer into a string
+                res.push(str); // add string to the result list
             } else {
-                buf.clear()
+                buf.clear() // clear the buffer (since it is "dead" space between words)
             }
-            capture = !capture;
-        } else if ch == '\\' {
+            capture = !capture; // invert capture so that on first quote we start capturing, and on second we stop capturing and add string to results
+        } else if ch == '\\' { //if char is a \ we escape the next char
             escaped = true
         } else {
-            buf.push(ch)
+            buf.push(ch) // we just push the char since it needs no special handling
         }
     };
-    res
+    res //return the results
 }
 
 /// global struct for the state of the media player
@@ -64,6 +64,7 @@ struct Status {
     handle: Option<StaticSoundHandle>
 }
 
+/// debug formatter for printing status mid-run (ignores the handle and manager and controlls field)
 impl fmt::Debug for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Status").field("upcoming", &self.upcoming).field("lookback", &self.lookback).finish()
@@ -85,20 +86,21 @@ impl Status {
         let upcoming = if let Some(upcoming) = self.upcoming.pop_front() {
             upcoming //we have a next song
         } else {
+            // there is no next song so we just silence the current one and return without the next one (other code detects that handle has stopped)
             let _ = self.handle.as_mut().unwrap().stop(Tween::default());
             return;
         };
 
         //check if the name starts with a `@` in which case it is a special case
-        //special case for "i know i am shuffling but play these songs in order"
+        //special case as for eg: if the song is shuffled but I want these songs to be played in order. eg: Bergentrückung + ASGORE from undertale
         if upcoming.to_string_lossy().starts_with('@') {
             let mut words = quoted(upcoming.to_string_lossy().chars());// split the string into quoted words
             words.reverse();//reverse so they are pushed onto song queue right
             for song in words {
                 self.upcoming.push_front(song.into())// put them on here
             };
-            self.play_next_song();
-            return;
+            self.play_next_song(); // head STRAIGHT to playing the next song
+            return; // so we dont push the @ line to the lookback (it gets buggy if we do)
         };
 
         //push the song to loopback so the back button works
@@ -107,52 +109,64 @@ impl Status {
         //turn the path back so it can be checked 
         let path = Path::new(&upcoming);
 
-        if !path.exists() {return} // if path does not exists we just exit so it can start next song (or stop the music player if that was the last one)
+        if !path.exists() { // if path does not exists we just exit so it can start next song (or stop the music player if that was the last one)
+            println!("Path {path:?} does not exists. Skipping"); // let the user in terminal know that path does not exists
+            return
+        }
 
-        //get path's extension. or default it to blank
+        //get path's extension. or default it to blank if it does not exists/cannot be turned into UTF-8
         let ext = path.extension().unwrap_or(OsStr::new("")).to_str().unwrap_or("");
         
-        #[allow(unused_mut)]
+        #[allow(unused_mut)] // create a media metadata, must silence unused mut as a later assign to `meta.duration` fails if I do not define this as mutable
         let mut meta = MediaMetadata {
             title: path.file_name().unwrap().to_str(),
             ..Default::default()
         };
+
         let sound = match ext {
-            "wav" | "mp3" => {
+            "wav" | "mp3" | "flac" | "ogg" => { // known file type that kira supports directly so we play it
                 StaticSoundData::from_file(path, StaticSoundSettings::default()).unwrap()
             }
-            x if MOD_FORMATS.get().unwrap().contains(&x.to_string()) => {
-                let mut cmd = Command::new("openmpt123");
-                cmd.args([path.to_str().unwrap(),"-o","/tmp/openmpt_convert.wav", "--force"]);
-                cmd.stdout(Stdio::null());
-                #[cfg(debug_assertions)]
-                println!("{:?}",cmd);
-                let _ = cmd.spawn().unwrap().wait();
-                StaticSoundData::from_file("/tmp/openmpt_convert.wav", StaticSoundSettings::default()).unwrap()
+            x if MOD_FORMATS.get().unwrap().contains(&x.to_string()) => { // convert the tracker music to a tmp wav file.
+                // this is TEMPORARY until the openmpt crate starts working again
+                let mut cmd = Command::new("openmpt123"); // start making a new `openmpt123` command to run in terminal
+                cmd.args([path.to_str().unwrap(),"-o","/tmp/openmpt_convert.wav", "--force"]); // convert the selected tracker music file and put it at /tmp/openmpt_convert.wav, and replace it if it allready exists
+                cmd.stdout(Stdio::null()); // supress stdout 
+                let _ = cmd.spawn().unwrap().wait(); // run the command
+                StaticSoundData::from_file("/tmp/openmpt_convert.wav", StaticSoundSettings::default()).unwrap() // load wav file
+                
+                // the INTENDED method. but the openmpt crate is broken (does not fill buffers correctly)
                 //let mut file = File::open(path).unwrap();
                 //let module = Module::create(&mut file, Logger::None, &[]).unwrap();
                 //StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
             }
-            _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("!!failed to unwrap path as str!!"))
+            _ => {
+                println!("unsupported format '{}' file {}. SKIPPING",ext,path.to_str().unwrap_or("!!failed to unwrap path as str!!"));
+                return; // it failed to play song so we skip to next song
+            }
         };
+
         //set metadata's duration for the song
         meta.duration = Some(sound.duration());
+
         //create a new static sound handle for the song
         let hand = self.manager.play(sound).unwrap();
         //set the handle for audio
         self.handle = Some(hand);
+
         let _ = self.controls.set_metadata(meta); //set media metadata
         let _ = self.controls.set_playback(souvlaki::MediaPlayback::Playing { progress: None }); //play the song (with no progress since we have not started)
-        println!("song is playing");
+        println!("song is playing"); // notify user via text that song has started
         
     }
     /// pushes a specified PathBuf to the front of lookback. this voids a old value if the len is == capacity
     fn push_song_to_lookback(&mut self, song: PathBuf) {
         if self.lookback.len() == self.lookback.capacity() {
-            let _ = self.lookback.pop_back(); //we know it is at capacity. and we are voiding it anyways.
+            let _ = self.lookback.pop_back(); //we know it is at capacity. this makes it so that we clear the last index and prevent it from crashing due to being over full
         }
-        self.lookback.push_front(song)
+        self.lookback.push_front(song) // push new song to lookback
     }
+
     /// plays the song at the front of the lookback...
     fn do_the_previous_one(&mut self) {
         // we pop one from the lookback (the current song)
@@ -169,23 +183,24 @@ impl Status {
 }
 
 #[derive(Parser, Debug)]
-#[command(author = "walksanator", version = "v1", about = "command line music player", long_about = None)]
+#[command(author = "[redacted]", version = "v1", about = "command line music player", long_about = None)]
 struct Args {
-    /// whether or not to shuffle the audio before playing
+    /// whether or not to shuffle the audio before playing/when playlist is empty
     #[arg(short, long, help = "sets whether or not to shuffle the music list")]
     shuffle: bool,
 
-    /// whether or not to loop the playlist when it is empty
+    /// whether or not to loop the playlist/song when it is empty/over
     #[arg(short, long, help = "sets looping of the music when all songs have been played")]
     looping: bool,
     
-    /// all the songs to play
+    /// all the songs/playlist to play
     #[arg(required(true))]
     files: Vec<PathBuf>,
 }
 
-/// a once lock to hold a mutex of our status so we can refrence it later
+/// a once lock to hold a mutex of our status so we can refrence and init it later
 static GLOBAL_STATE: OnceLock<Mutex<Status>> = OnceLock::new();
+
 /// I *would* do this at compile time. but it can change from platform to platform.
 static MOD_FORMATS: OnceLock<Vec<String>> = OnceLock::new();
 
@@ -219,7 +234,7 @@ fn get_songs(file_or_path: &Path) -> Vec<PathBuf> {
                 let mut lines: Vec<&str> = contents.lines().collect();
                 lines.reverse(); // the iterator reverses it. so to keep it in order. we reverse the lines here.
 
-                let mut final_songs = Vec::new();
+                let mut final_songs = Vec::new(); // create a final of list of songs
                 for l in lines {
                     final_songs.extend(get_songs(&PathBuf::from_str(l).unwrap()));
                 }
@@ -261,7 +276,10 @@ fn main() {
     let hwnd = {
         use raw_window_handle::windows::WindowsHandle;
 
-        let handle: WindowsHandle = unimplemented!();
+        let handle: WindowsHandle = match window.raw_window_handle() {
+            RawWindowHandle::Win32(h) => h,
+            _ => unreachable!(),
+        };
         Some(handle.hwnd)
     };
 
