@@ -26,8 +26,12 @@ fn quoted<T>(tgt: T) -> Vec<String> where T: Iterator<Item = char> {
     let mut res = vec![];
     let mut capture = false;
     let mut buf = vec![];
+    let mut escaped = false;
     for ch in tgt {
-        if ch == '"' {
+        if escaped {
+            buf.push(ch);
+            escaped = false
+        } else if ch == '"' {
             if capture {
                 let str: String = buf.iter().collect();
                 res.push(str);
@@ -35,6 +39,8 @@ fn quoted<T>(tgt: T) -> Vec<String> where T: Iterator<Item = char> {
                 buf.clear()
             }
             capture = !capture;
+        } else if ch == '\\' {
+            escaped = true
         } else {
             buf.push(ch)
         }
@@ -75,24 +81,37 @@ impl Status {
     fn play_next_song(&mut self) {
         self.stopit();
         println!("playing next song");
-        #[cfg(debug_assertions)]
-        println!("before {:?}",self.upcoming);
+        //get the next song or if there is none stop the current song and exit
         let upcoming = if let Some(upcoming) = self.upcoming.pop_front() {
-            upcoming
+            upcoming //we have a next song
         } else {
             let _ = self.handle.as_mut().unwrap().stop(Tween::default());
             return;
         };
-        #[cfg(debug_assertions)]
-        println!("after {:?}",self.upcoming);
+
+        //check if the name starts with a `@` in which case it is a special case
+        //special case for "i know i am shuffling but play these songs in order"
+        if upcoming.to_string_lossy().starts_with('@') {
+            let mut words = quoted(upcoming.to_string_lossy().chars());// split the string into quoted words
+            words.reverse();//reverse so they are pushed onto song queue right
+            for song in words {
+                self.upcoming.push_front(song.into())// put them on here
+            };
+            self.play_next_song();
+            return;
+        };
+
+        //push the song to loopback so the back button works
         self.push_song_to_lookback(upcoming.clone());
+
+        //turn the path back so it can be checked 
         let path = Path::new(&upcoming);
-        #[cfg(debug_assertions)]
-        println!("path {:?}",path);
-        if !path.exists() {return}
+
+        if !path.exists() {return} // if path does not exists we just exit so it can start next song (or stop the music player if that was the last one)
+
+        //get path's extension. or default it to blank
         let ext = path.extension().unwrap_or(OsStr::new("")).to_str().unwrap_or("");
-        #[cfg(debug_assertions)]
-        println!("extension {}",ext);
+        
         #[allow(unused_mut)]
         let mut meta = MediaMetadata {
             title: path.file_name().unwrap().to_str(),
@@ -114,13 +133,16 @@ impl Status {
                 //let module = Module::create(&mut file, Logger::None, &[]).unwrap();
                 //StreamingSoundData::from_decoder(ModDecoder::new(module), StreamingSoundSettings::default())
             }
-            _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("failed to unwrap"))
+            _ => panic!("unsupported format '{}' file {}",ext,path.to_str().unwrap_or("!!failed to unwrap path as str!!"))
         };
+        //set metadata's duration for the song
         meta.duration = Some(sound.duration());
+        //create a new static sound handle for the song
         let hand = self.manager.play(sound).unwrap();
+        //set the handle for audio
         self.handle = Some(hand);
-        let _ = self.controls.set_metadata(meta);
-        let _ = self.controls.set_playback(souvlaki::MediaPlayback::Playing { progress: None });
+        let _ = self.controls.set_metadata(meta); //set media metadata
+        let _ = self.controls.set_playback(souvlaki::MediaPlayback::Playing { progress: None }); //play the song (with no progress since we have not started)
         println!("song is playing");
         
     }
@@ -231,8 +253,7 @@ fn update_playback(state: &mut Status) {
 fn main() {
     let args = Args::parse(); // parse args
     let _ = MOD_FORMATS.set(get_supported_extensions().split(';').map(|x| x.to_string()).collect()); // init the MOD_FORMATS
-    #[cfg(debug_assertions)]
-    println!("{:?}",args.files);
+
     // souvlaki stuff... I just copied from the docs
     #[cfg(not(target_os = "windows"))]
     let hwnd = None; 
@@ -246,13 +267,12 @@ fn main() {
 
     // dbus config so it shows up.
     let config = PlatformConfig {
-        dbus_name: "walksanator_music_player",
-        display_name: "Walksanator's MusicBox",
+        dbus_name: "redacted_music_player",
+        display_name: "[Redacted]'s MusicBox",
         hwnd,
     };
 
-    #[cfg(debug_assertions)]
-    println!("creating media controls");
+
     // init media controlls
     let mut controls = MediaControls::new(config).unwrap();
     // setup the event handler for all the media commands.
@@ -303,9 +323,6 @@ fn main() {
         })
         .unwrap();
     
-    #[cfg(debug_assertions)]
-    println!("setting initial metadata");
-
     // Update the media metadata to a default.
     controls
         .set_metadata(MediaMetadata {
@@ -316,8 +333,6 @@ fn main() {
         })
         .unwrap();
     
-    #[cfg(debug_assertions)]
-    println!("audio manager"); // create the audio manager.
     let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).unwrap();
 
     #[cfg(debug_assertions)]
@@ -343,20 +358,19 @@ fn main() {
             if args.looping {
                 state.handle = None;
             } else {
-                #[cfg(debug_assertions)]
-                println!("breaking, state {:?}",state.handle.as_ref().map_or(PlaybackState::Stopping,|h| h.state()));
                 break
             }
         }
         // is the queue is empty and there is no currently playing audio
         // refill queue
-        if state.upcoming.is_empty() && state.handle.is_none()  {
+        if state.upcoming.is_empty() && state.handle.is_none() {
             println!("filling queue.");
             let mut queue = vec![];
             for path in &args.files {
                 queue.append(&mut get_songs(path));
             }
             queue.dedup(); // remove duplicate songs... (note: may remove this later)
+            queue.reverse();
             if args.shuffle {
                 print!("Shuffling...");
                 queue.shuffle(&mut thread_rng());
