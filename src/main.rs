@@ -270,18 +270,19 @@ fn main() {
     let _ = MOD_FORMATS.set(get_supported_extensions().split(';').map(|x| x.to_string()).collect()); // init the MOD_FORMATS
 
     // souvlaki stuff... I just copied from the docs
-    #[cfg(not(target_os = "windows"))]
+    //#[cfg(not(target_os = "windows"))]
     let hwnd = None; 
-    #[cfg(target_os = "windows")]
-    let hwnd = {
-        use raw_window_handle::windows::WindowsHandle;
-
-        let handle: WindowsHandle = match window.raw_window_handle() {
-            RawWindowHandle::Win32(h) => h,
-            _ => unreachable!(),
-        };
-        Some(handle.hwnd)
-    };
+    //#[cfg(target_os = "windows")]
+    //let hwnd = {
+    //    let event_loop = EventLoop::new();
+    //    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    //    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    //    let handle: WindowsHandle = match window.raw_window_handle() {
+    //        RawWindowHandle::Win32(h) => h,
+    //        _ => unreachable!(),
+    //    };
+    //    Some(handle.hwnd)
+    //};
 
     // dbus config so it shows up.
     let config = PlatformConfig {
